@@ -1,0 +1,83 @@
+#include <Arduino_FreeRTOS.h>
+#include <queue.h>
+#include <semphr.h>
+#include <Wire.h>
+
+
+// Pins
+#define LED1_PIN    13
+#define LED2_PIN    12
+#define BUTTON_PIN   2
+
+// TSL2561 Configuration
+#define TSL2561_ADDR 0x39      // default I2C address
+#define MIN_LUX       0.0      // 0% reference
+#define MAX_LUX   40000.0      // 100% reference (bright sunlight)
+
+// FreeRTOS objects
+QueueHandle_t  xButtonQueue;
+SemaphoreHandle_t xSerialMutex;
+
+
+// ISR: notify button task
+void buttonISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  xQueueSendFromISR(xButtonQueue, NULL, &xHigherPriorityTaskWoken);
+  if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+}
+
+// Task 1: Blink LED1 at 500 ms
+void TaskBlink(void* pvParameters) {
+  pinMode(LED1_PIN, OUTPUT);
+  for (;;) {
+    digitalWrite(LED1_PIN, !digitalRead(LED1_PIN));
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+
+// Task 2: Handle button presses → toggle LED2 + UART
+void TaskButton(void* pvParameters) {
+  pinMode(LED2_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
+
+  for (;;) {
+    // Block until ISR posts to queue
+    if (xQueueReceive(xButtonQueue, NULL, portMAX_DELAY) == pdTRUE) {
+      // Toggle LED2
+      digitalWrite(LED2_PIN, !digitalRead(LED2_PIN));
+
+      // Print message without clobbering other Serial output
+      if (xSemaphoreTake(xSerialMutex, pdMS_TO_TICKS(50))) {
+        Serial.print("Button pressed, LED2 is now ");
+        Serial.println(digitalRead(LED2_PIN) ? "ON" : "OFF");
+        xSemaphoreGive(xSerialMutex);
+      }
+    }
+  }
+}
+
+
+
+void setup() {
+  // UART & I2C
+  Serial.begin(9600);
+  Wire.begin();
+
+
+  // Create RTOS primitives
+  xButtonQueue   = xQueueCreate( 5, 0 );
+  xSerialMutex   = xSemaphoreCreateMutex();
+
+  // Spawn tasks
+  xTaskCreate(TaskBlink,  "Blink",  128, NULL, 1, NULL);
+  xTaskCreate(TaskButton, "Button", 128, NULL, 2, NULL);
+
+
+  // Start scheduler
+  vTaskStartScheduler();
+}
+
+void loop() {
+  // empty — RTOS tasks take over
+}
